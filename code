@@ -1,0 +1,201 @@
+import pandas as pd
+import os
+import numpy as np
+import lightgbm as lgb
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+import xgboost as xgb
+import lightgbm as lgb
+import missingno as msno
+
+train = pd.read_csv('train.csv', dtype={'msno' : 'category',
+                                                'source_system_tab' : 'category',
+                                                  'source_screen_name' : 'category',
+                                                  'source_type' : 'category',
+                                                  'target' : np.uint8,
+                                                  'song_id' : 'category'})
+songs = pd.read_csv('songs.csv',dtype={'genre_ids': 'category',
+                                                  'language' : 'category',
+                                                  'artist_name' : 'category',
+                                                  'composer' : 'category',
+                                                  'lyricist' : 'category',
+                                                  'song_id' : 'category'})
+members = pd.read_csv('members.csv',dtype={'city' : 'category',
+                                                      'bd' : np.uint8,
+                                                      'gender' : 'category',
+                                                      'registered_via' : 'category'})
+                                                      
+listen_list = pd.merge(train, songs, on='song_id')
+
+listen_list_groupby = listen_list[['song_id', 'target']].groupby(['song_id']).agg(['mean',
+                                                                                 'count'])
+listen_list_groupby.reset_index(inplace=True)
+listen_list_groupby.columns = list(map(''.join, listen_list_groupby.columns.values))
+listen_list_groupby.columns = ['song_id', 'succeed_probability', 'plays']
+
+song_data = listen_list_groupby.merge(songs, on='song_id') # merge song data with computed values
+
+song_data['repeat_events'] = song_data['succeed_probability'] * song_data['plays']
+
+song_data['plays'].max(), song_data['plays'].min()
+
+temp = train[train['target'] == 1]
+artist_list = pd.merge(temp[['msno','song_id']], songs, on='song_id')
+artist_songs_number = artist_list.groupby(['artist_name']).agg('count')
+
+artist_repeat_time_list = pd.DataFrame({'artist_name':artist_songs_number.index, 
+                                      'play_artist_song_no':artist_songs_number['song_length']})
+artist_repeat_time_list = artist_repeat_time_list.reset_index(drop=True)
+
+song_repeat_time = pd.merge(temp[['song_id']], songs, on='song_id')
+song_repeat_time_1 = song_repeat_time.groupby('song_id').agg('count')
+
+song_repeat_time_list = pd.DataFrame({'song_id':song_repeat_time_1.index, 
+                                      'single_song_repeat_no':song_repeat_time_1['song_length']})
+song_repeat_time_list = song_repeat_time_list.reset_index(drop=True)
+
+listen_list_new = pd.merge(listen_list, artist_repeat_time_list, on = 'artist_name')
+listen_list_new = pd.merge(listen_list_new, song_repeat_time_list, on = 'song_id')
+listen_list_new['popularity'] = listen_list_new['single_song_repeat_no']/listen_list_new['play_artist_song_no']
+listen_list_new['repeat_events'] = song_data['repeat_events']
+
+listen_list_new = pd.merge(listen_list_new, members, on = 'msno')
+print('Song stats: ')
+print('Number of songs in dataset is ' + str(listen_list_new['song_id'].nunique()))
+print('User stats: ')
+print('There is ' + str(listen_list_new['msno'].nunique()) + ' users')
+print('Artists stats: ')
+print('The dataset contains ' + str(listen_list_new['artist_name'].nunique()) + ' artists')
+print('Language stats: ')
+print('The dataset contains ' + str(listen_list_new['language'].nunique()) + ' languages')
+print('Genre stats: ')
+print('The dataset contains ' + str(listen_list_new['genre_ids'].nunique()) + ' type of music')
+msno.matrix(listen_list_new, labels=True)
+
+for col in listen_list_new.select_dtypes(include=['object']).columns:
+    listen_list_new[col] = listen_list_new[col].astype('category')
+    
+# Encoding categorical features
+for col in listen_list_new.select_dtypes(include=['category']).columns:
+    listen_list_new[col] = listen_list_new[col].cat.codes
+    
+# Сorrelation matrix
+plt.figure(figsize=[18,18])
+sns.heatmap(listen_list_new.corr(), linewidths=0.25, vmax=1, square=True, 
+            cmap="cubehelix", linecolor='k', annot=True)
+plt.show()
+
+# Replace NA
+for i in listen_list_new.select_dtypes(include=['object']).columns:
+    listen_list_new[i][listen_list_new[i].isnull()] = 'unknown'
+listen_list_new = listen_list_new.fillna(value=0)
+from statlearning import plot_histograms
+plot_histograms(listen_list_new) # excludes the last variable, since it is binary
+plt.show() #Log transformation require
+
+listen_list_new['song_length'] = np.log(listen_list_new['song_length'])
+listen_list_new['play_artist_song_no'] = np.log(listen_list_new['play_artist_song_no'])
+listen_list_new['single_song_repeat_no'] = np.log(listen_list_new['single_song_repeat_no'])
+listen_list_new['popularity'] = np.log(listen_list_new['popularity'])
+plot_histograms(listen_list_new) # excludes the last variable, since it is binary
+plt.show()
+df = listen_list_new
+from sklearn.model_selection import train_test_split
+import numpy as np
+index_train, index_test = train_test_split(np.array(df.index), train_size = 0.75, random_state = 1)
+train = df.loc[index_train, :].copy()
+test = df.loc[index_test, :].copy()
+
+from sklearn.feature_selection import SelectFromModel
+x_train = train.drop(['target','expiration_date', 'lyricist', 'bd'], axis = 1)
+y_train = train['target']
+thresh = 10**(-2)
+model = lgb.LGBMClassifier(random_status = 1)
+model.fit(x_train, y_train)
+
+selection = SelectFromModel(model, threshold = thresh, prefit = True)
+select_x_train = selection.transform(x_train)
+feature_idx = selection.get_support(indices = True)
+feature_name = x_train.columns[feature_idx]
+feature_name, len(feature_name)
+
+from sklearn.preprocessing import StandardScaler
+x_train = train[feature_name].copy()
+scaler = StandardScaler()
+scaler.fit(x_train)
+x_train_scaled = scaler.transform(x_train)
+
+x_test = test[feature_name].copy()
+x_test_scaled = scaler.transform(x_test)
+y_test = test["target"].copy()
+
+from sklearn.model_selection import GridSearchCV
+param_test1 = {
+    #'max_depth':np.arange(12, 17, 2)#13 is the best
+    'max_depth':[12,13,14]
+}
+gsearch1 = GridSearchCV(estimator = lgb.LGBMClassifier(learning_rate = 0.1,
+                        n_estimators = 200, max_depth = 13, gamma = 0, subsample = 0.8,
+                        colsample_bytree = 0.8, nthread = 4, random_state = 2,
+                        seed = 27),
+                       param_grid = param_test1, n_jobs = 4, iid = False, cv = 3)
+gsearch1.fit(x_train_scaled, y_train)
+gsearch1.best_params_, gsearch1.best_score_
+
+param_test2 = {
+    #'max_depth':np.arange(12, 17, 2)#13 is the best
+    'max_depth':[14,16,18]
+}
+gsearch2 = GridSearchCV(estimator = lgb.LGBMClassifier(learning_rate = 0.1,
+                        n_estimators = 200, max_depth = 13, gamma = 0, subsample = 0.8,
+                        colsample_bytree = 0.8, nthread = 8, random_state = 2,
+                        seed = 27),
+                       param_grid = param_test2, n_jobs = 4, iid = False, cv = 3)
+gsearch2.fit(x_train_scaled, y_train)
+gsearch2.best_params_, gsearch2.best_score_
+
+param_test3 = {
+    'colsample_bytree':np.arange(0.1, 1, 0.3)#10 is the best
+}
+gsearch3 = GridSearchCV(estimator = lgb.LGBMClassifier(learning_rate = 0.1,
+                        n_estimators = 200, max_depth = 13, gamma = 0, subsample = 0.8,
+                        colsample_bytree = 0.8, nthread = 8, random_state = 2,
+                        seed = 27),
+                       param_grid = param_test3, n_jobs = 4, iid = False, cv = 3)
+gsearch3.fit(x_train_scaled, y_train)
+gsearch3.best_params_, gsearch3.best_score_
+
+param_test4 = {
+    'learning_rate':np.arange(0.01, 0.1, 0.03)#10 is the best
+}
+gsearch4 = GridSearchCV(estimator = lgb.LGBMClassifier(learning_rate = 0.1,
+                        n_estimators = 200, max_depth = 14, gamma = 0, subsample = 0.8,
+                        colsample_bytree = 0.7, nthread = 8, random_state = 2,
+                        seed = 27),
+                       param_grid = param_test4, n_jobs = 4, iid = False, cv = 3)
+gsearch4.fit(x_train_scaled, y_train)
+gsearch4.best_params_, gsearch4.best_score_
+
+model_lgb = lgb.LGBMClassifier(learning_rate = 0.1, n_estimators = 200, max_depth = 14, 
+                               gamma = 0, subsample = 0.7, colsample_bytree = 0.7, 
+                               nthread = 8, random_state = 2, seed = 27)
+model_lgb.fit(x_train_scaled, y_train)
+
+
+y_pre = model_lgb.predict(x_test_scaled)
+print(confusion_matrix(y_test, y_pre))
+
+print("Precision")
+print(confusion_matrix(y_test, y_pre)[0][0]/(confusion_matrix(y_test, y_pre)[0][0] + 
+                                             confusion_matrix(y_test, y_pre)[1][0]))
+                                             
+print("Accuracy")
+print((confusion_matrix(y_test, y_pre)[0][0] + confusion_matrix(y_test, y_pre)[1][1])/
+      (confusion_matrix(y_test, y_pre)[0][0] + confusion_matrix(y_test, y_pre)[0][1] +
+        confusion_matrix(y_test, y_pre)[1][0] + confusion_matrix(y_test, y_pre)[1][1]))
+
+model_lgb.score(x_test_scaled, y_test)
+from statlearning import plot_feature_importance
+plot_feature_importance(model_lgb, x_train.columns,10)
+plt.show()
