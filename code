@@ -144,7 +144,6 @@ gsearch1.fit(x_train_scaled, y_train)
 gsearch1.best_params_, gsearch1.best_score_
 
 param_test2 = {
-    #'max_depth':np.arange(12, 17, 2)#13 is the best
     'max_depth':[14,16,18]
 }
 gsearch2 = GridSearchCV(estimator = lgb.LGBMClassifier(learning_rate = 0.1,
